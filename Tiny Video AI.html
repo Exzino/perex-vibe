@@ -1,0 +1,238 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>Tiny Video AI</title>
+<style>
+:root{--bg:#fff;--fg:#1a1a1a;--mu:#666;--cd:#f3f3f1;--ac:#5b4bdb;--bd:#d8d8d4;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#16161a;--fg:#eee;--mu:#9a9aa3;--cd:#222228;--ac:#8b7dff;--bd:#38383f}}
+:root[data-theme="dark"]{--bg:#16161a;--fg:#eee;--mu:#9a9aa3;--cd:#222228;--ac:#8b7dff;--bd:#38383f}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,sans-serif}
+main{max-width:720px;margin:auto;padding:16px}h1{font-size:22px;margin:4px 0}
+.card{background:var(--cd);border:1px solid var(--bd);border-radius:12px;padding:14px;margin:12px 0}
+.row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:8px 0}.mu{color:var(--mu);font-size:13px}
+button{background:var(--ac);color:#fff;border:0;border-radius:8px;padding:8px 14px;font:inherit;cursor:pointer}button.g{background:transparent;color:var(--fg);border:1px solid var(--bd)}button:disabled{opacity:.5}
+select,input{font:inherit;background:var(--bg);color:var(--fg);border:1px solid var(--bd);border-radius:6px;padding:4px}input[type=number]{width:80px}input[type=text]{flex:1;min-width:200px}
+canvas,video{max-width:100%;border-radius:8px;background:#000;display:block}#pv{height:96px}.it{display:flex;gap:8px;align-items:center;margin:6px 0}.it img{width:48px;height:48px;border-radius:6px;flex:none}.it input{flex:1;min-width:120px}#log{white-space:pre-wrap}
+</style></head><body><main>
+<h1>Tiny Video AI</h1>
+<p class="mu">A real neural network (conv VAE + text-conditioned latent dynamics) trained in your browser: no API, no server, no pretrained model. Type a prompt, get a video the network generates.</p>
+<div class="card"><b>1 · Training data</b>
+<div class="row"><label>Clips <input type="number" id="nc" value="200" min="20" max="300"></label><button id="ds">Generate nature &amp; city dataset</button>
+<label>Size <select id="res"><option>32<option>64</select></label><label>Frames/s <select id="fps"><option>4<option selected>8<option>12</select></label><label>Max sec/video <input type="number" id="mx" value="8" min="2" max="60"></label><button class="g" id="cl">Clear</button></div>
+<div class="mu">A published page can’t download datasets, so I can’t pull from Pexels or any site. The built-in dataset is rendered inside the page: 8 kinds of nature and city scenes with captions. For real footage, download clips from Pexels yourself, then add them theme by theme (select all the ocean clips, type “ocean waves”, repeat):</div>
+<div class="row"><input type="text" id="cap" placeholder="optional caption for this batch (default: file name)"><input type="file" id="f" accept="video/*" multiple></div><div class="mu">Add as many videos as you like (again and again), then rename each one below. The words in the names are what the AI learns, so reuse the same words across similar videos (“ocean waves”, “dog running”).</div><div id="pnd"></div><div id="lst" class="mu">No videos added yet.</div></div>
+<div class="card"><b>2 · Train</b>
+<div class="row"><label>Steps <input type="number" id="steps" value="2500" min="100" step="100"></label>
+<button id="tr">Train</button><button class="g" id="sp">Finish early</button><button class="g" id="sv">Save in browser</button><button class="g" id="ld">Load from browser</button><button class="g" id="ex">Export to file</button><button class="g" id="im">Import file</button><input type="file" id="imf" accept=".json,application/json" hidden></div>
+<canvas id="pv" width="64" height="32"></canvas><div id="log" class="mu">Generate the dataset to begin.</div></div>
+<div class="card"><b>3 · Prompt → video</b>
+<div class="row"><input type="text" id="pt" value="sunset over the ocean with calm waves"></div>
+<div class="mu">Try: “heavy rain falling at night”, “green aurora over mountains in the night sky”, “red fireworks bursting in the night sky”, “snow falling at daytime”, “small campfire burning at night”, “clouds drifting quickly over mountains at sunset”, “city at night with fast traffic moving left”. Times: daytime, sunset, night.</div>
+<div class="row"><label>Seconds <input type="number" id="sec" value="4" min="2" max="20"></label>
+<label>Creativity <input type="range" id="cr" min="0" max="100" value="20"></label><button id="gn">Generate</button></div>
+<canvas id="out" width="384" height="384"></canvas>
+<video id="vo" controls playsinline hidden style="margin-top:10px;width:384px"></video>
+<div class="mu">The recording appears below the preview; right-click (or long-press) to save it.</div></div>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+<script>
+const $=i=>document.getElementById(i),L=32,log=t=>$('log').textContent=t;
+let S=32,R=8,clips=[],caps=[],info=[],pend=[],enc,dec,dyn,st,mean,std,voc=[],stop=0,built='';
+const gn=()=>(Math.random()+Math.random()+Math.random()-1.5)*2;
+const tok=t=>t.toLowerCase().match(/[a-z0-9]+/g)||[];
+const bow=t=>{const v=new Array(voc.length).fill(0);tok(t).forEach(w=>{const i=voc.indexOf(w);if(i>=0)v[i]=1});return v};
+const f2a=(p,a,m)=>{for(let j=0;j<S*S;j++){a[m++]=p[4*j]/255;a[m++]=p[4*j+1]/255;a[m++]=p[4*j+2]/255}return m};
+function prep(){const s=+$('res').value,r=+$('fps').value;if(s!=S||r!=R){clips=[];caps=[];info=[];render()}S=s;R=r;const c=document.createElement('canvas');c.width=c.height=S;return c.getContext('2d',{willReadFrequently:true})}
+const mk=f=>new Promise(r=>{const v=document.createElement('video');v.muted=true;v.style.cssText='position:fixed;left:-9999px;width:8px';document.body.append(v);v.playsInline=true;v.preload='auto';
+ v.onloadedmetadata=()=>r(v);
+ v.onerror=()=>{if(v.dataset.fb)return r(null);v.dataset.fb=1;const q=new FileReader();q.onload=()=>v.src=q.result;q.readAsDataURL(f)};
+ setTimeout(()=>r(null),20000);v.src=URL.createObjectURL(f)});
+const wait=(v,t)=>Promise.race([new Promise(r=>{v.onseeked=r;v.currentTime=t}),new Promise(r=>setTimeout(r,2500))]);
+async function load(files){
+ prep();const mx=+$('mx').value||8;
+ async function one(f){const cx=mkcx();
+  const p={st:'Opening…',name:f.name};pend.push(p);rp();const v=await mk(f);if(!v){p.st='Cannot read this video (unsupported format?). Click to dismiss.';p.err=1;rp();return}
+  const n=Math.floor(Math.min(v.duration||mx,mx)*R),w=v.videoWidth,h=v.videoHeight,s=Math.min(w,h),a=new Float32Array(n*S*S*3);let m=0;
+  m=await grab(v,cx,n,p,a,w,h,s);
+  if(m>=4*S*S*3){clips.push(a.slice(0,m));caps.push($('cap').value||nm(f));info.push({name:f.name,th:cx.canvas.toDataURL()});pend.splice(pend.indexOf(p),1);render()}else{p.st='Video too short or unreadable. Click to dismiss.';p.err=1}v.remove();rp()}
+ const qq=[...files];await Promise.all(Array.from({length:Math.min(3,qq.length)},async()=>{for(let f;f=qq.shift();)await one(f)}));render();log(clips.length+' clip(s) in the dataset. Rename them below if you like, then press Train.');
+}
+const COL={red:'#e53935',green:'#43a047',blue:'#1e88e5',yellow:'#fdd835',white:'#fafafa'},DIR={left:[-1,0],right:[1,0],up:[0,-1],down:[0,1]},SP={slow:.25,fast:.5};
+const pick=o=>{const k=Object.keys(o);return k[Math.random()*k.length|0]};
+const tri=u=>{u=(u%2+2)%2;return u>1?2-u:u},pos=(s,d,t)=>.15+.7*tri((s-.15)/.7+d*t/.7);
+async function synth(){
+ const cx=prep(),n=+$('nc').value,T=3*R;
+ for(let c=0;c<n;c++){
+  const col=pick(COL),sh=Math.random()<.5?'ball':'square',d=pick(DIR),sp=pick(SP),[dx,dy]=DIR[d],v=SP[sp]/R,a=new Float32Array(T*S*S*3);
+  const sx=dx?(dx>0?.15:.85):.3+Math.random()*.4,sy=dy?(dy>0?.15:.85):.3+Math.random()*.4;let m=0;
+  for(let t=0;t<T;t++){
+   const X=pos(sx,dx,v*t)*S,Y=pos(sy,dy,v*t)*S,r=S*.13;
+   cx.fillStyle='#14141c';cx.fillRect(0,0,S,S);cx.fillStyle=COL[col];
+   if(sh=='ball'){cx.beginPath();cx.arc(X,Y,r,0,7);cx.fill()}else cx.fillRect(X-r,Y-r,2*r,2*r);
+   m=f2a(cx.getImageData(0,0,S,S).data,a,m)}
+  clips.push(a);caps.push('a '+col+' '+sh+' moving '+d+' '+sp);
+  if(c%10==0){log('Rendering dataset … '+c+'/'+n);await tf.nextFrame()}}
+ log(clips.length+' captioned clips ready. Press Train.');
+}
+const SKY={daytime:['#3b82d6','#bfe3ff'],sunset:['#3a2a6e','#ff8a3d'],night:['#04050d','#1b2147']},rnd=n=>Array.from({length:n},()=>Math.random());
+const sky=(cx,k)=>{const g=cx.createLinearGradient(0,0,0,S);g.addColorStop(0,SKY[k][0]);g.addColorStop(1,SKY[k][1]);cx.fillStyle=g;cx.fillRect(0,0,S,S)},bg=(cx,c)=>{cx.fillStyle=c;cx.fillRect(0,0,S,S)};
+const SC=[
+()=>{const k=pick(SKY),w=Math.random()<.5?'calm':'rough',a=w=='calm'?.4:1.3,sp=w=='calm'?1.5:4,sx=.2+Math.random()*.6;
+ return[k+' over the ocean with '+w+' waves',(cx,t)=>{sky(cx,k);const h=S*.55;cx.fillStyle=k=='night'?'#fff':'#ffd27a';cx.beginPath();cx.arc(sx*S,h-S*.12-t*S*.02,S*.07,0,7);cx.fill();
+  cx.fillStyle=k=='night'?'#07102a':k=='sunset'?'#5a2a4a':'#1f5fa8';cx.fillRect(0,h,S,S-h);cx.fillStyle='rgba(255,255,255,.4)';
+  for(let y=h+1;y<S;y+=2)for(let x=0;x<S;x+=3)if(Math.sin(x*.9+y*.5+t*sp*2)*a>.7)cx.fillRect(x,y,2,1)}]},
+()=>{const k=pick(SKY),wd=Math.random()<.5?'slowly':'quickly',v=wd=='slowly'?.05:.2,ph=rnd(2),cl=rnd(6);
+ return['clouds drifting '+wd+' over mountains at '+k,(cx,t)=>{sky(cx,k);cx.fillStyle=k=='night'?'rgba(255,255,255,.25)':'rgba(255,255,255,.85)';
+  cl.forEach((r,i)=>{cx.beginPath();cx.ellipse(((r+t*v+i/6)%1.3-.15)*S,S*(.12+.3*((i*.37)%1)),S*.14,S*.05,0,0,7);cx.fill()});
+  cx.fillStyle=k=='night'?'#0a0c18':'#2d3b3a';cx.beginPath();cx.moveTo(0,S);for(let x=0;x<=S;x+=2)cx.lineTo(x,S*(.62-.18*Math.abs(Math.sin(x*.12+ph[0]*6))-.08*Math.sin(x*.3+ph[1]*6)));cx.lineTo(S,S);cx.fill()}]},
+()=>{const k=Math.random()<.5?'daytime':'night',n=Math.random()<.5?'light':'heavy',N=n=='light'?10:35,P=rnd(N*2);
+ return[n+' rain falling at '+k,(cx,t)=>{bg(cx,k=='night'?'#0b0f1a':'#6b7785');cx.strokeStyle='rgba(190,210,255,.7)';cx.lineWidth=S/32;cx.beginPath();
+  for(let i=0;i<N;i++){const x=P[2*i]*S,y=((P[2*i+1]+t*1.6)%1)*S*1.2-S*.1;cx.moveTo(x,y);cx.lineTo(x-S*.02,y+S*.08)}cx.stroke()}]},
+()=>{const k=Math.random()<.5?'daytime':'night',P=rnd(60);
+ return['snow falling at '+k,(cx,t)=>{bg(cx,k=='night'?'#070b18':'#8fa3b8');cx.fillStyle='#fff';
+  for(let i=0;i<30;i++)cx.fillRect((P[2*i]+.03*Math.sin(t*2+i))*S,((P[2*i+1]+t*.3)%1)*S,S/16,S/16)}]},
+()=>{const c=pick(COL),b=[0,1.2,2.2].map(s=>[s+Math.random()*.3,.2+Math.random()*.6,.15+Math.random()*.4]);
+ return[c+' fireworks bursting in the night sky',(cx,t)=>{bg(cx,'#05060f');cx.fillStyle=COL[c];
+  b.forEach(([s,x,y])=>{const u=t-s;if(u<0||u>1.1)return;cx.globalAlpha=1-u/1.1;for(let i=0;i<14;i++){const a=i*.449,r=u*S*.28;cx.fillRect(x*S+Math.cos(a)*r,y*S+Math.sin(a)*r+u*u*S*.1,S/20+1,S/20+1)}});cx.globalAlpha=1}]},
+()=>{const z=Math.random()<.5?'small':'big',s=z=='small'?.6:1,fx=.35+Math.random()*.3,P=rnd(12);
+ return[z+' campfire burning at night',(cx,t)=>{bg(cx,'#06070c');
+  for(let i=0;i<12;i++){const u=(P[i]+t*1.3)%1;cx.fillStyle='rgba(255,'+(200-u*170|0)+',40,'+(1-u)+')';cx.beginPath();cx.arc((fx+(P[(i+3)%12]-.5)*.12*(1-u))*S,S*(.85-.5*s*u),S*.07*s*(1-u*.6),0,7);cx.fill()}
+  cx.fillStyle='#3a2414';cx.fillRect(fx*S-S*.1,S*.88,S*.2,S*.06)}]},
+()=>{const c=Math.random()<.5?'green':'purple',h=c=='green'?[130,150]:[270,300],ph=Math.random()*6,P=rnd(20);
+ return[c+' aurora over mountains in the night sky',(cx,t)=>{bg(cx,'#03050c');
+  for(let x=0;x<S;x++){const y=S*(.3+.12*Math.sin(x*.18+t*1.2+ph)+.06*Math.sin(x*.5-t*2)),g=cx.createLinearGradient(0,y-S*.3,0,y+S*.15);g.addColorStop(0,'rgba(0,0,0,0)');g.addColorStop(.7,'hsla('+h[0]+',90%,55%,.55)');g.addColorStop(1,'hsla('+h[1]+',90%,60%,0)');cx.fillStyle=g;cx.fillRect(x,y-S*.3,1,S*.45)}
+  cx.fillStyle='#fff';P.forEach((r,i)=>cx.fillRect(r*S,P[(i+7)%20]*.4*S,1,1));cx.fillStyle='#080a10';cx.beginPath();cx.moveTo(0,S);for(let x=0;x<=S;x+=2)cx.lineTo(x,S*(.8-.1*Math.abs(Math.sin(x*.2+ph))));cx.lineTo(S,S);cx.fill()}]},
+()=>{const d=Math.random()<.5?'left':'right',v=Math.random()<.5?.15:.4,sp=v<.2?'slow':'fast',W=rnd(40),s=d=='left'?-1:1;
+ return['city at night with '+sp+' traffic moving '+d,(cx,t)=>{bg(cx,'#070914');
+  for(let i=0;i<8;i++){const x=i*S/8,h=S*(.25+.35*((i*.61)%1));cx.fillStyle='#0f1326';cx.fillRect(x,S-h-S*.12,S/8-1,h);
+   for(let j=0;j<6;j++)if(W[(i*5+j)%40]>.4&&Math.sin(t*.5+i+j)>-.7){cx.fillStyle='#ffd77a';cx.fillRect(x+2,S-h-S*.1+j*S*.07,2,2)}}
+  cx.fillStyle='#14171f';cx.fillRect(0,S*.88,S,S*.12);
+  for(let i=0;i<5;i++){cx.fillStyle=i%2?'#ff4040':'#fff6d0';cx.fillRect((((i/5+s*v*t)%1)+1)%1*S,S*.92,S*.07,S*.04)}}]}
+];
+async function synth2(){
+ const cx=prep(),n=+$('nc').value,T=3*R;
+ for(let c=0;c<n;c++){const[cap,dr]=SC[Math.random()*SC.length|0](),a=new Float32Array(T*S*S*3);let m=0;
+  for(let f=0;f<T;f++){cx.save();dr(cx,f/R);cx.restore();m=f2a(cx.getImageData(0,0,S,S).data,a,m)}
+  clips.push(a);caps.push(cap);info.push({syn:1});if(c%10==0){log('Rendering dataset … '+c+'/'+n);await tf.nextFrame()}}
+ render();log(clips.length+' captioned clips ready. Press Train.');
+}
+function rp(){const e=$('pnd');e.innerHTML='';pend.forEach(p=>{const d=document.createElement('div');d.className='it mu';d.textContent=p.name+' — '+p.st;if(p.err){d.style.color='#d33';d.style.cursor='pointer';d.onclick=()=>{pend.splice(pend.indexOf(p),1);rp()}}e.append(d)})}
+function mkcx(){const c=document.createElement('canvas');c.width=c.height=S;return c.getContext('2d',{willReadFrequently:true})}
+async function grab(v,cx,n,p,a,w,h,s){
+ let m=0,k=0;const dr=()=>{cx.drawImage(v,(w-s)/2,(h-s)/2,s,s,0,0,S,S);m=f2a(cx.getImageData(0,0,S,S).data,a,m);k++};
+ if(v.requestVideoFrameCallback){
+  const rate=Math.max(1,Math.min(16,Math.floor(40/R)));
+  await new Promise(done=>{let fin=0;const end=()=>{if(!fin){fin=1;v.pause();done()}};
+   const cb=(t,md)=>{while(k<n&&md.mediaTime>=k/R)dr();if(k%4==0){p.st='Reading frames '+k+'/'+n;rp()}if(k>=n)return end();v.requestVideoFrameCallback(cb)};
+   v.onended=end;v.playbackRate=rate;setTimeout(end,10000+n/R/rate*3000);v.play().then(()=>v.requestVideoFrameCallback(cb)).catch(end)})}
+ if(!v.requestVideoFrameCallback||!k)for(;k<n;){await wait(v,k/R+.01);dr();if(k%2==0){p.st='Reading frames '+k+'/'+n;rp()}}
+ return m}
+const b64=u=>{let s='';for(let i=0;i<u.length;i+=8192)s+=String.fromCharCode.apply(null,u.subarray(i,i+8192));return btoa(s)};
+const unb=s=>{const t=atob(s),u=new Uint8Array(t.length);for(let i=0;i<t.length;i++)u[i]=t.charCodeAt(i);return u};
+const svm=m=>new Promise(r=>m.save(tf.io.withSaveHandler(async a=>{r({t:a.modelTopology,s:a.weightSpecs,w:b64(new Uint8Array(a.weightData))});return{modelArtifactsInfo:{dateSaved:new Date(),modelTopologyType:'JSON'}}})));
+async function exp(){
+ if(!clips.length&&!dyn)return log('Nothing to export yet.');
+ const dl=window.claude?await claude.use('downloads'):null;if(!dl)return log('File downloads are not available in this view.');
+ try{log('Preparing the file …');const o={v:1,S,R,mean:mean?Array.from(mean):null,std:std?Array.from(std):null,voc,m:{}};
+  if(dyn&&mean)for(const[k,m]of Object.entries({enc,dec,dyn,st}))o.m[k]=await svm(m);
+  o.c=clips.map((a,i)=>({cap:caps[i],i:info[i],d:b64(Uint8Array.from(a,x=>Math.round(x*255)))}));
+  await dl.save({filename:'tiny-video-ai-'+new Date().toISOString().slice(0,10)+'.json',data:new Blob([JSON.stringify(o)],{type:'application/json'})});log('Export saved: model + '+clips.length+' clips.')}
+ catch(e){log(e.code=='declined'?'Export cancelled.':'Export failed: '+(e.message||e.code))}
+}
+async function imp(f){
+ try{log('Reading the file …');const o=JSON.parse(await f.text());if(o.v!=1)throw Error('this is not a Tiny Video AI file');
+  S=o.S;R=o.R;mean=o.mean;std=o.std;voc=o.voc||[];$('res').value=S;$('fps').value=R;clips=[];caps=[];info=[];
+  for(const c of o.c){const u=unb(c.d),a=new Float32Array(u.length);for(let i=0;i<u.length;i++)a[i]=u[i]/255;clips.push(a);caps.push(c.cap);info.push(c.i||{syn:1})}
+  if(o.m.dyn){const ld=x=>tf.loadLayersModel(tf.io.fromMemory({modelTopology:x.t,weightSpecs:x.s,weightData:unb(x.w).buffer}));enc=await ld(o.m.enc);dec=await ld(o.m.dec);dyn=await ld(o.m.dyn);st=await ld(o.m.st);built=S+'|'+voc.join()}
+  else{enc=dec=dyn=st=null;built=''}
+  render();log('Imported: '+clips.length+' clips'+(o.m.dyn?' and the trained model. Train to continue, or generate right away.':'. Press Train.'))}
+ catch(e){log('Import failed: '+e.message)}
+}
+function nm(f){return f.name.replace(/\.[^.]+$/,'').replace(/[0-9]+|pexels|[-_()]+/gi,' ').replace(/\s+/g,' ').trim()||'video'}
+function render(){
+ const el=$('lst');el.innerHTML='';const ns=info.filter(i=>i.syn).length;
+ if(ns){const d=document.createElement('div'),b=document.createElement('button'),s=document.createElement('span');d.className='it';s.textContent='Built-in dataset: '+ns+' captioned clips';b.className='g';b.textContent='Remove';
+  b.onclick=()=>{for(let i=info.length-1;i>=0;i--)if(info[i].syn){clips.splice(i,1);caps.splice(i,1);info.splice(i,1)}render()};d.append(s,b);el.append(d)}
+ info.forEach((n,i)=>{if(n.syn)return;const d=document.createElement('div'),im=new Image(),t=document.createElement('input'),b=document.createElement('button'),s=document.createElement('span');
+  d.className='it';im.src=n.th;t.type='text';t.value=caps[i];t.oninput=()=>{caps[i]=t.value};s.className='mu';s.textContent=(clips[i].length/(S*S*3)|0)+' frames';
+  b.className='g';b.textContent='Remove';b.onclick=()=>{clips.splice(i,1);caps.splice(i,1);info.splice(i,1);render()};d.append(im,t,s,b);el.append(d)})
+}
+function build(){
+ const n=Math.log2(S/4),V=voc.length,ch=[...Array(n)].map((_,k)=>Math.min(16<<k,128)),i=tf.input({shape:[S,S,3]});let x=i;
+ ch.forEach(c=>x=tf.layers.conv2d({filters:c,kernelSize:3,strides:2,padding:'same',activation:'relu'}).apply(x));
+ x=tf.layers.flatten().apply(x);
+ enc=tf.model({inputs:i,outputs:[tf.layers.dense({units:L}).apply(x),tf.layers.dense({units:L}).apply(x)]});
+ const zi=tf.input({shape:[L]});let y=tf.layers.dense({units:16*ch[n-1],activation:'relu'}).apply(zi);
+ y=tf.layers.reshape({targetShape:[4,4,ch[n-1]]}).apply(y);
+ for(let k=n-1;k>=0;k--)y=tf.layers.conv2dTranspose({filters:k?ch[k-1]:3,kernelSize:3,strides:2,padding:'same',activation:k?'relu':'sigmoid'}).apply(y);
+ dec=tf.model({inputs:zi,outputs:y});
+ dyn=tf.sequential({layers:[tf.layers.dense({units:256,activation:'relu',inputShape:[2*L+V]}),tf.layers.dense({units:256,activation:'relu'}),tf.layers.dense({units:L})]});
+ st=tf.sequential({layers:[tf.layers.dense({units:128,activation:'relu',inputShape:[V]}),tf.layers.dense({units:128,activation:'relu'}),tf.layers.dense({units:2*L})]});
+}
+async function train(){
+ if(!clips.length)return log('Generate the dataset (or add videos) first.');
+ $('tr').disabled=true;voc=[...new Set(tok(caps.join(' ')))].sort();if(!voc.length)voc=['_'];
+ const key=S+'|'+voc.join();if(built!=key||!enc){build();built=key}stop=0;
+ const sz=S*S*3,tot=clips.reduce((s,c)=>s+c.length,0),A=new Float32Array(tot);let o=0;clips.forEach(c=>{A.set(c,o);o+=c.length});
+ const X=tf.tensor4d(A,[tot/sz,S,S,3]),N=X.shape[0],op=tf.train.adam(2e-3),stp=+$('steps').value;
+ for(let i=0;i<stp&&!stop;i++){
+  const l=tf.tidy(()=>{const x=X.gather(tf.randomUniform([32],0,N,'int32'));
+   return op.minimize(()=>{const[m,v]=enc.apply(x,{training:true});
+    const z=m.add(tf.exp(v.mul(.5)).mul(tf.randomNormal(m.shape))),r=dec.apply(z,{training:true});
+    const rec=tf.sum(tf.square(x.sub(r)),[1,2,3]).mean(),kl=tf.sum(tf.exp(v).add(tf.square(m)).sub(1).sub(v),1).mean().mul(.5);
+    return rec.add(kl.mul(.1))},true)});
+  if(i%25==0){log('Phase 1/3 · learning to see · step '+i+'/'+stp+' · loss '+(await l.data())[0].toFixed(1));
+   const cat=tf.tidy(()=>{const x=X.slice([Math.random()*N|0,0,0,0],[1,S,S,3]);return tf.concat([x,dec.predict(enc.predict(x)[0])],2).squeeze()});
+   await tf.browser.toPixels(cat,$('pv'));cat.dispose()}
+  l.dispose();await tf.nextFrame()}
+ stop=0;
+ const zs=clips.map(c=>tf.tidy(()=>enc.predict(tf.tensor4d(c,[c.length/sz,S,S,3]))[0])),mo=tf.moments(tf.concat(zs),0);
+ mean=await mo.mean.data();std=(await mo.variance.sqrt().data()).map(v=>v+1e-3);
+ const mt=tf.tensor1d(mean),sd=tf.tensor1d(std);let P=[],C=[],Q=[],B=[],F=[],T0=[];
+ zs.forEach((z,ci)=>{const n=z.shape[0];if(n<3)return;const q=z.sub(mt).div(sd),e=tf.tensor2d([bow(caps[ci])]);
+  P.push(q.slice([0,0],[n-2,L]));C.push(q.slice([1,0],[n-2,L]));Q.push(q.slice([2,0],[n-2,L]));B.push(tf.tile(e,[n-2,1]));
+  F.push(e);T0.push(q.slice([0,0],[2,L]).reshape([1,2*L]))});
+ [P,C,Q,B,F,T0]=[P,C,Q,B,F,T0].map(a=>tf.concat(a));const M=P.shape[0];
+ const o3=tf.train.adam(2e-3);
+ for(let i=0;i<1500&&!stop;i++){tf.tidy(()=>{o3.minimize(()=>tf.losses.meanSquaredError(T0,st.apply(F,{training:true})))});
+  if(i%100==0){log('Phase 2/3 · text → first frames · step '+i+'/1500');await tf.nextFrame()}}
+ const o2=tf.train.adam(1e-3);
+ for(let i=0;i<3000&&!stop;i++){
+  const l=tf.tidy(()=>{const d=tf.randomUniform([64],0,M,'int32'),a=P.gather(d).add(tf.randomNormal([64,L],0,.1)),b=C.gather(d).add(tf.randomNormal([64,L],0,.1)),y=Q.gather(d).sub(b),e=B.gather(d);
+   return o2.minimize(()=>tf.losses.meanSquaredError(y,dyn.apply(tf.concat([a,b,e],1),{training:true})),true)});
+  if(i%100==0){log('Phase 3/3 · learning motion · step '+i+'/3000 · loss '+(await l.data())[0].toFixed(3));await tf.nextFrame()}l.dispose()}
+ [X,P,C,Q,B,F,T0,mt,sd,...zs].forEach(t=>t.dispose());
+ log('Training done. Try a prompt below. Vocabulary: '+voc.join(' '));$('tr').disabled=false;
+}
+function showVid(b){const v=$('vo');v.hidden=false;
+ v.onerror=()=>{v.onerror=null;const r=new FileReader();r.onload=()=>v.src=r.result;r.readAsDataURL(b)};v.src=URL.createObjectURL(b)}
+async function generate(){
+ if(!dyn||!st||!mean)return log('Train first (or load a saved model).');
+ const pr=$('pt').value,known=tok(pr).filter(w=>voc.includes(w));
+ if(!known.length)return log('No known words in that prompt. Vocabulary: '+voc.join(' '));
+ log('Understood words: '+known.join(' '));
+ const sec=+$('sec').value,cr=+$('cr').value/100,e=bow(pr),s0=tf.tidy(()=>st.predict(tf.tensor2d([e])).dataSync());
+ let p=Array.from(s0.slice(0,L)),c=Array.from(s0.slice(L));
+ const off=c.map(()=>gn()*cr*.5);p=p.map((v,i)=>v+off[i]);c=c.map((v,i)=>v+off[i]);
+ const Z=[c];
+ for(let i=1;i<sec*R;i++){
+  const d=tf.tidy(()=>dyn.predict(tf.tensor2d([[...p,...c,...e]])).dataSync());
+  const nx=c.map((v,j)=>Math.max(-3.5,Math.min(3.5,v+d[j]+gn()*cr*.08)));p=c;c=nx;Z.push(c)}
+ const K=Math.ceil(24/R),Fr=[];
+ for(let i=0;i<Z.length-1;i++)for(let k=0;k<K;k++)Fr.push(Z[i].map((v,j)=>(v+(Z[i+1][j]-v)*k/K)*std[j]+mean[j]));
+ const im=tf.tidy(()=>dec.predict(tf.tensor2d(Fr))),px=await im.data();im.dispose();
+ const oc=$('out'),x=oc.getContext('2d'),sm=document.createElement('canvas');sm.width=sm.height=S;const sx=sm.getContext('2d'),fs=R*K,nf=Fr.length;
+ let rec,ch=[];
+ try{rec=new MediaRecorder(oc.captureStream(fs),MediaRecorder.isTypeSupported('video/webm')?{mimeType:'video/webm'}:{});
+  rec.ondataavailable=q=>ch.push(q.data);rec.onstop=()=>showVid(new Blob(ch,{type:rec.mimeType||'video/webm'}));rec.start()}catch(_){rec=null}
+ $('gn').disabled=true;const t0=performance.now();
+ await new Promise(res=>{const f=()=>{const i=Math.floor((performance.now()-t0)/1000*fs);if(i>=nf)return res();
+  const id=sx.createImageData(S,S);for(let j=0;j<S*S;j++){for(let k=0;k<3;k++)id.data[4*j+k]=px[(i*S*S+j)*3+k]*255;id.data[4*j+3]=255}
+  sx.putImageData(id,0,0);x.drawImage(sm,0,0,oc.width,oc.height);requestAnimationFrame(f)};f()});
+ if(rec)setTimeout(()=>rec.stop(),150);$('gn').disabled=false;
+}
+async function save(){try{await enc.save('indexeddb://v-enc');await dec.save('indexeddb://v-dec');await dyn.save('indexeddb://v-dyn');await st.save('indexeddb://v-st');
+ localStorage.setItem('v-meta',JSON.stringify({S,R,mean:Array.from(mean),std:Array.from(std),voc}));log('Model saved in this browser.')}catch(e){log('Save failed: '+e.message)}}
+async function loadM(){try{enc=await tf.loadLayersModel('indexeddb://v-enc');dec=await tf.loadLayersModel('indexeddb://v-dec');dyn=await tf.loadLayersModel('indexeddb://v-dyn');st=await tf.loadLayersModel('indexeddb://v-st');
+ const m=JSON.parse(localStorage.getItem('v-meta'));({S,R,mean,std,voc}=m);built=S+'|'+voc.join();log('Model loaded ('+S+'px). Vocabulary: '+voc.join(' '))}catch(e){log('No saved model found.')}}
+$('f').onchange=async e=>{const fl=[...e.target.files];e.target.value='';try{await load(fl)}catch(er){pend.push({name:'Error',st:er.message+' (click to dismiss)',err:1});rp()}};$('ds').onclick=synth2;$('cl').onclick=()=>{clips=[];caps=[];info=[];render();log('Dataset cleared.')};
+$('ex').onclick=exp;$('im').onclick=()=>$('imf').click();$('imf').onchange=e=>{const f=e.target.files[0];e.target.value='';if(f)imp(f)};$('tr').onclick=train;$('sp').onclick=()=>stop=1;$('gn').onclick=generate;$('sv').onclick=save;$('ld').onclick=loadM;
+</script></body></html>
